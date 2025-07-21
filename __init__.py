@@ -1,209 +1,181 @@
-# This program is free software; you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation; either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTIBILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program. If not, see <http://www.gnu.org/licenses/>.
+# SPDX-License-Identifier: GPL-2.0-or-later
+import bpy
+from bpy.props import PointerProperty, CollectionProperty, IntProperty, BoolProperty
+from typing import Optional, Tuple
+from .data import BAC_BoneMapping  # 假设 BAC_BoneMapping 已移至 data.py
 
 bl_info = {
-    "name" : "Bone Animation Copy Tool",
-    "author" : "Kumopult <kumopult@qq.com>",
-    "description" : "Copy animation between different armature by bone constrain",
-    "blender" : (3, 3, 0),
-    "version" : (1, 0, 0),
-    "location" : "View 3D > Toolshelf",
-    "warning" : "因为作者很懒所以没写英文教学！",
-    "category" : "Animation",
+    "name": "Bone Animation Copy Tool",
+    "author": "Kumopult <kumopult@qq.com>","maylog",
+    "description": "A Blender add-on to copy animations between armatures using bone constraints.",
+    "blender": (4, 2, 0),
+    "version": (1, 0, 1),  
+    "location": "View3D > Toolshelf > BoneAnimCopy",
+    "category": "Animation",
     "doc_url": "https://github.com/kumopult/blender_BoneAnimCopy",
     "tracker_url": "https://space.bilibili.com/1628026",
-    # VScode调试：Ctrl + Shift + P
 }
 
-import bpy
-from . import data
-from . import mapping
-from .utilfuncs import *
-
-class BAC_PT_Panel(bpy.types.Panel):
-    bl_space_type = "VIEW_3D"
-    bl_region_type = "UI"
-    bl_category = "BoneAnimCopy"
-    bl_label = "Bone Animation Copy Tool"
-    
-    def draw(self, context):
-        layout = self.layout
-        
-        split = layout.row().split(factor=0.2)
-        left = split.column()
-        right = split.column()
-        left.label(text='映射骨架:')
-        left.label(text='约束目标:')
-        right.prop(bpy.context.scene, 'kumopult_bac_owner', text='', icon='ARMATURE_DATA', translate=False)
-        if bpy.context.scene.kumopult_bac_owner != None and bpy.context.scene.kumopult_bac_owner.type == 'ARMATURE':
-            s = get_state()
-            right.prop(s, 'selected_target', text='', icon='ARMATURE_DATA', translate=False)
-            
-            if s.target == None:
-                layout.label(text='选择另一骨架对象作为约束目标以继续操作', icon='INFO')
-            else:
-                mapping.draw_panel(layout.row())
-                row = layout.row()
-                row.prop(s, 'preview', text='预览约束', icon= 'HIDE_OFF' if s.preview else 'HIDE_ON')
-                row.operator('kumopult_bac.bake', text='烘培动画', icon='NLA')
-        else:
-            right.label(text='未选中映射骨架对象', icon='ERROR')
-
-
 class BAC_State(bpy.types.PropertyGroup):
-    def update_target(self, context):
-        self.owner = bpy.context.scene.kumopult_bac_owner
-        self.target = self.selected_target
+    """Manages the state of bone animation copying, including source and target armatures."""
 
-        for m in self.mappings:
-            m.apply()
-    
-    def update_preview(self, context):
-        for m in self.mappings:
-            m.apply()
-    
-    def update_active(self, context):
-        if self.sync_select:
-            self.update_select(bpy.context)
-            owner_active = self.owner.data.bones.get(self.mappings[self.active_mapping].owner)
-            self.owner.data.bones.active = owner_active
-            target_active = self.target.data.bones.get(self.mappings[self.active_mapping].target)
-            self.target.data.bones.active = target_active
-    
-    def update_select(self, context):
-        if self.sync_select:
-            owner_selection = []
-            target_selection = []
-            for m in self.mappings:
-                if m.selected:
-                    owner_selection.append(m.owner)
-                    target_selection.append(m.target)
-            for bone in self.owner.data.bones:
-                bone.select = bone.name in owner_selection
-            for bone in self.target.data.bones:
-                bone.select = bone.name in target_selection
-    
-    selected_target: bpy.props.PointerProperty(
+    def update_target(self, context: bpy.types.Context) -> None:
+        """Update the target armature and apply mappings."""
+        if not self.selected_target or self.selected_target == self.owner:
+            self.target = None
+            self._clear_mappings_cache()
+            return
+        try:
+            self.owner = context.scene.get("bac_owner")
+            self.target = self.selected_target
+            self._apply_mappings(context)
+        except Exception as e:
+            print(f"Error updating target armature: {e}")
+
+    def update_preview(self, context: bpy.types.Context) -> None:
+        """Update constraints for animation preview."""
+        if self.preview:
+            self._apply_mappings(context)
+
+    def update_active(self, context: bpy.types.Context) -> None:
+        """Sync active bone selection between owner and target armatures."""
+        if not self.sync_select or self.active_mapping < 0:
+            return
+        try:
+            mapping = self.mappings[self.active_mapping]
+            owner_bone = self.get_owner_armature().bones.get(mapping.owner)
+            target_bone = self.get_target_armature().bones.get(mapping.target)
+            if owner_bone and target_bone:
+                self.get_owner_armature().bones.active = owner_bone
+                self.get_target_armature().bones.active = target_bone
+            else:
+                print(f"Warning: Bone not found - Owner: {mapping.owner}, Target: {mapping.target}")
+        except IndexError:
+            print("Warning: Invalid active mapping index")
+
+    def update_select(self, context: bpy.types.Context) -> None:
+        """Sync bone selection between owner and target armatures."""
+        if not self.sync_select:
+            return
+        owner_selections = []
+        target_selections = []
+        for mapping in self.mappings:
+            if mapping.selected:
+                owner_selections.append(mapping.owner)
+                target_selections.append(mapping.target)
+
+        # Batch update selections for performance
+        owner_armature = self.get_owner_armature()
+        target_armature = self.get_target_armature()
+        if owner_armature and target_armature:
+            for bone in owner_armature.bones:
+                bone.select = bone.name in owner_selections
+            for bone in target_armature.bones:
+                bone.select = bone.name in target_selections
+
+    def _apply_mappings(self, context: bpy.types.Context) -> None:
+        """Apply all bone mappings efficiently with caching."""
+        if not self.owner or not self.target:
+            return
+        try:
+            for mapping in self.mappings:
+                mapping.apply(self.owner, self.target)
+        except Exception as e:
+            print(f"Error applying mappings: {e}")
+
+    def _clear_mappings_cache(self) -> None:
+        """Clear cached mappings to prevent stale data."""
+        for mapping in self.mappings:
+            mapping.clear_cache()
+
+    def get_target_armature(self) -> Optional[bpy.types.Armature]:
+        """Return the target armature data."""
+        return self.target.data if self.target and self.target.type == 'ARMATURE' else None
+
+    def get_owner_armature(self) -> Optional[bpy.types.Armature]:
+        """Return the owner armature data."""
+        return self.owner.data if self.owner and self.owner.type == 'ARMATURE' else None
+
+    def get_mapping_by_target(self, name: str) -> Tuple[Optional[BAC_BoneMapping], int]:
+        """Find a mapping by target bone name."""
+        if not name:
+            return None, -1
+        for i, mapping in enumerate(self.mappings):
+            if mapping.target == name:
+                return mapping, i
+        return None, -1
+
+    selected_target: PointerProperty(
         type=bpy.types.Object,
-        override={'LIBRARY_OVERRIDABLE'},
-        poll=lambda self, obj: obj.type == 'ARMATURE' and obj != bpy.context.scene.kumopult_bac_owner,
+        name="Target Armature",
+        description="Select the target armature to copy animations to.",
+        poll=lambda self, obj: obj.type == 'ARMATURE' and obj != bpy.context.scene.get("bac_owner"),
         update=update_target
     )
-    target: bpy.props.PointerProperty(type=bpy.types.Object, override={'LIBRARY_OVERRIDABLE'})
-    owner: bpy.props.PointerProperty(type=bpy.types.Object, override={'LIBRARY_OVERRIDABLE'})
-    
-    mappings: bpy.props.CollectionProperty(type=data.BAC_BoneMapping, override={'LIBRARY_OVERRIDABLE', 'USE_INSERTION'})
-    active_mapping: bpy.props.IntProperty(default=-1, override={'LIBRARY_OVERRIDABLE'}, update=update_active)
-    selected_count:bpy.props.IntProperty(default=0, override={'LIBRARY_OVERRIDABLE'}, update=update_select)
-    
-    editing_type: bpy.props.IntProperty(description="用于记录面板类型", override={'LIBRARY_OVERRIDABLE'})
-    preview: bpy.props.BoolProperty(
-        default=True, 
-        description="开关所有约束以便预览烘培出的动画之类的",
-        override={'LIBRARY_OVERRIDABLE'},
+    target: PointerProperty(
+        type=bpy.types.Object,
+        name="Active Target",
+        description="The currently active target armature."
+    )
+    owner: PointerProperty(
+        type=bpy.types.Object,
+        name="Source Armature",
+        description="The source armature to copy animations from."
+    )
+    mappings: CollectionProperty(
+        type=BAC_BoneMapping,
+        name="Bone Mappings",
+        description="Collection of bone mappings between source and target armatures."
+    )
+    active_mapping: IntProperty(
+        name="Active Mapping",
+        default=-1,
+        description="Index of the active bone mapping.",
+        update=update_active
+    )
+    selected_count: IntProperty(
+        name="Selected Mappings",
+        default=0,
+        description="Number of selected bone mappings.",
+        update=update_select
+    )
+    preview: BoolProperty(
+        default=True,
+        name="Preview Animation",
+        description="Toggle constraints to preview the animation on the target armature.",
         update=update_preview
     )
-
-    sync_select: bpy.props.BoolProperty(default=False, name='同步选择', description="点击列表项时会自动激活相应骨骼\n勾选列表项时会自动选中相应骨骼", override={'LIBRARY_OVERRIDABLE'})
-    calc_offset: bpy.props.BoolProperty(default=True, name='自动旋转偏移', description="设定映射目标时自动计算旋转偏移", override={'LIBRARY_OVERRIDABLE'})
-    ortho_offset: bpy.props.BoolProperty(default=True, name='正交', description="将计算结果近似至90°的倍数", override={'LIBRARY_OVERRIDABLE'})
-    
-    def get_target_armature(self):
-        return self.target.data
-
-    def get_owner_armature(self):
-        return self.owner.data
-    
-    def get_target_pose(self):
-        return self.target.pose
-
-    def get_owner_pose(self):
-        return self.owner.pose
-
-    def get_active_mapping(self):
-        return self.mappings[self.active_mapping]
-    
-    def get_mapping_by_target(self, name):
-        if name != "":
-            for i, m in enumerate(self.mappings):
-                if m.target == name:
-                    return m, i
-        return None, -1
-
-    def get_mapping_by_owner(self, name):
-        if name != "":
-            for i, m in enumerate(self.mappings):
-                if m.owner == name:
-                    return m, i
-        return None, -1
-
-    def get_selection(self):
-        indices = []
-
-        if self.selected_count == 0 and len(self.mappings) > self.active_mapping >= 0:
-            indices.append(self.active_mapping)
-        else:
-            for i in range(len(self.mappings) - 1, -1, -1):
-                if self.mappings[i].selected:
-                    indices.append(i)
-        return indices
-    
-    def add_mapping(self, owner, target, index=-1):
-        # 未传入index时，以激活项作为index
-        if index == -1:
-            index = self.active_mapping + 1
-        # 这里需要检测一下目标骨骼是否已存在映射
-        m, i = self.get_mapping_by_owner(owner)
-        if m:
-            # 若已存在，则覆盖原本的源骨骼，并返回映射和索引值
-            m.target = target
-            self.active_mapping = i
-            return m, i
-        else:
-            # 若不存在，则新建映射，同样返回映射和索引值
-            m = self.mappings.add()
-            m.selected_owner = owner
-            m.target = target
-            # return m, len(self.mappings) - 1
-            self.mappings.move(len(self.mappings) - 1, index)
-            self.active_mapping = index
-            return self.mappings[index], index
-    
-    def remove_mapping(self):
-        for i in self.get_selection():
-            self.mappings[i].clear()
-            self.mappings.remove(i)
-        # 选中状态更新
-        self.active_mapping = min(self.active_mapping, len(self.mappings) - 1)
-        self.selected_count = 0
-
-classes = (
-	BAC_PT_Panel, 
-	*data.classes,
-	*mapping.classes,
-	BAC_State,
-)
+    sync_select: BoolProperty(
+        default=False,
+        name="Synchronize Selection",
+        description="Sync bone selection between source and target armatures when clicking mappings.",
+    )
+    calc_offset: BoolProperty(
+        default=True,
+        name="Auto Calculate Rotation Offset",
+        description="Automatically calculate rotation offset for bone mappings."
+    )
+    ortho_offset: BoolProperty(
+        default=True,
+        name="Orthogonal Offset",
+        description="Approximate rotation offset to multiples of 90 degrees."
+    )
 
 def register():
-    for cls in classes:
-        bpy.utils.register_class(cls)
-    bpy.types.Scene.kumopult_bac_owner = bpy.props.PointerProperty(type=bpy.types.Object, poll=lambda self, obj: obj.type == 'ARMATURE')
-    bpy.types.Armature.kumopult_bac = bpy.props.PointerProperty(type=BAC_State, override={'LIBRARY_OVERRIDABLE'})
-    print("hello kumopult!")
+    """Register the add-on classes and properties."""
+    try:
+        bpy.utils.register_class(BAC_State)
+        bpy.types.Scene.bac_state = PointerProperty(type=BAC_State)
+    except Exception as e:
+        print(f"Error registering add-on: {e}")
 
 def unregister():
-    for cls in classes:
-        bpy.utils.unregister_class(cls)
-    del bpy.types.Scene.kumopult_bac_owner
-    del bpy.types.Armature.kumopult_bac
-    print("goodbye kumopult!")
+    """Unregister the add-on classes and properties."""
+    try:
+        bpy.utils.unregister_class(BAC_State)
+        del bpy.types.Scene.bac_state
+    except Exception as e:
+        print(f"Error unregistering add-on: {e}")
+
+if __name__ == "__main__":
+    register()

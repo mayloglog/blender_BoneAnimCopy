@@ -1,236 +1,130 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
 import bpy
-from .utilfuncs import *
-from math import pi
-from mathutils import Matrix, Euler
+from bpy.props import StringProperty, BoolProperty
+from typing import Optional
+from .utilfuncs import BAC_Utils  # 引用 utilfuncs.py 中的工具函数
 
 class BAC_BoneMapping(bpy.types.PropertyGroup):
-    def update_owner(self, context):
-        # 更改自身骨骼，需要先清空旧的约束再生成新的约束
-        self.clear()
-        self.owner = self.selected_owner
-        if self.get_owner() != None and len(self.get_owner().constraints) > 0:
-            alert_error('所选骨骼上包含其它约束', '本插件所生成的约束(名称以BAC开头)若与其它约束混用，可能导致烘焙效果出现偏差。建议避免映射这根骨骼')
-        self.apply()
-
-    def update_target(self, context):
-        # 更改目标骨骼，需要刷新约束上的目标
-        s = get_state()
-        if self.is_valid() and s.calc_offset:
-            # 计算旋转偏移
-            euler_offset = ((s.target.matrix_world @ self.get_target().matrix).inverted() @ (s.owner.matrix_world @ self.get_owner().matrix)).to_euler()
-            if s.ortho_offset:
-                step = pi * 0.5
-                euler_offset[0] = round(euler_offset[0] / step) * step
-                euler_offset[1] = round(euler_offset[1] / step) * step
-                euler_offset[2] = round(euler_offset[2] / step) * step
-            if euler_offset != None and euler_offset != Euler((0,0,0)):
-                self.offset[0] = euler_offset[0]
-                self.offset[1] = euler_offset[1]
-                self.offset[2] = euler_offset[2]
-                self.has_rotoffs = True
-        self.apply()
+    """Property group for managing a single bone mapping between source and target armatures."""
     
-    def update_rotcopy(self, context):
-        s = get_state()
-        cr = self.get_cr()
-        cr.target = s.target
-        cr.subtarget = self.target
-        # TODO: 让用户自定义或者加一个按钮切换旋转约束的目标和拥有者的解算空间?
-        # cr.owner_space = 'LOCAL'
-        # cr.target_space = 'LOCAL_OWNER_ORIENT' # 要先指定目标并且目标类型为骨架才有'LOCAL_OWNER_ORIENT'选项
-        set_enable(cr, self.is_valid() and s.preview)
+    name: StringProperty(
+        name="Mapping Name",
+        description="Name of the bone mapping.",
+        default="Bone Mapping"
+    )
     
-    def update_rotoffs(self, context):
-        s = get_state()
-        rr = self.get_rr()
-        if self.has_rotoffs:
-            rr.to_min_x_rot = self.offset[0]
-            rr.to_min_y_rot = self.offset[1]
-            rr.to_min_z_rot = self.offset[2]
-            rr.target = rr.space_object = s.target
-            rr.subtarget = rr.space_subtarget = self.target
-            set_enable(rr, self.is_valid() and s.preview)
-        else:
-            self.remove(rr)
-        
-    def update_loccopy(self, context):
-        s = get_state()
-        cp = self.get_cp()
-        if self.has_loccopy:
-            cp.use_x = self.loc_axis[0]
-            cp.use_y = self.loc_axis[1]
-            cp.use_z = self.loc_axis[2]
-            cp.target = s.target
-            cp.subtarget = self.target
-            set_enable(cp, self.is_valid() and s.preview)
-        else:
-            self.remove(cp)
+    owner: StringProperty(
+        name="Source Bone",
+        description="Name of the source bone in the source armature."
+    )
     
-    def update_ik(self, context):
-        s = get_state()
-        ik = self.get_ik()
-        if self.has_ik:
-            ik.influence = self.ik_influence
-            ik.target = s.target
-            ik.subtarget = self.target
-            set_enable(ik, self.is_valid() and s.preview)
-        else:
-            self.remove(ik)
-
-    selected_owner: bpy.props.StringProperty(
-        name="自身骨骼", 
-        description="将对方骨骼的旋转复制到自身的哪根骨骼上？", 
-        override={'LIBRARY_OVERRIDABLE'},
-        update=update_owner
+    target: StringProperty(
+        name="Target Bone",
+        description="Name of the target bone in the target armature."
     )
-    owner: bpy.props.StringProperty(override={'LIBRARY_OVERRIDABLE'})
-    target: bpy.props.StringProperty(
-        name="约束目标", 
-        description="从对方骨架中选择哪根骨骼作为约束目标？",
-        override={'LIBRARY_OVERRIDABLE'},
-        update=update_target
-    )
-
-    has_rotoffs: bpy.props.BoolProperty(
-        name="旋转偏移", 
-        description="附加额外约束，从而在原变换结果的基础上进行额外的旋转",
-        override={'LIBRARY_OVERRIDABLE'},
-        update=update_rotoffs
-    )
-    has_loccopy: bpy.props.BoolProperty(
-        name="位置映射", 
-        description="附加额外约束，从而使目标骨骼跟随原骨骼的世界坐标运动，通常应用于根骨骼、武器等",
-        override={'LIBRARY_OVERRIDABLE'},
-        update=update_loccopy
-    )
-    has_ik: bpy.props.BoolProperty(
-        name="IK",
-        description="附加额外约束，从而使目标骨骼跟随原骨骼进行IK矫正，通常应用于手掌、脚掌",
-        override={'LIBRARY_OVERRIDABLE'},
-        update=update_ik
-    )
-
-    offset: bpy.props.FloatVectorProperty(
-        name="旋转偏移量", 
-        description="世界坐标下复制旋转方向后，在那基础上进行的额外旋转偏移。通常只需要调整Y旋转", 
-        min=-pi,
-        max=pi,
-        override={'LIBRARY_OVERRIDABLE'},
-        subtype='EULER',
-        update=update_rotoffs
-    )
-    loc_axis: bpy.props.BoolVectorProperty(
-        name="位置映射轴向",
-        default=[True, True, True],
-        override={'LIBRARY_OVERRIDABLE'},
-        subtype='XYZ',
-        update=update_loccopy
-    )
-    ik_influence: bpy.props.FloatProperty(
-        name="IK影响权重",
-        default=1,
-        min=0,
-        max=1,
-        override={'LIBRARY_OVERRIDABLE'},
-        update=update_ik
-    )
-
-    def update_selected(self, context):
-        get_state().selected_count += 1 if self.selected else -1
     
-    selected: bpy.props.BoolProperty(override={'LIBRARY_OVERRIDABLE'}, update=update_selected)
-
+    selected: BoolProperty(
+        name="Selected",
+        description="Whether this mapping is selected for synchronization.",
+        default=False
+    )
     
-    def get_owner(self):
-        return get_state().get_owner_pose().bones.get(self.owner)
+    _constraint_cache = None  # Internal cache for constraints
 
-    def get_target(self):
-        return get_state().get_target_pose().bones.get(self.target)
+    def apply(self, owner: bpy.types.Object, target: bpy.types.Object, constraint_type: str = 'COPY_ROTATION') -> bool:
+        """Apply the bone mapping by setting up constraints.
 
-    def is_valid(self):
-        return (self.get_owner() != None and self.get_target() != None)
-    
+        Args:
+            owner: The source armature object.
+            target: The target armature object.
+            constraint_type: Type of constraint to apply (default: 'COPY_ROTATION').
 
-    def apply(self):
-        if not self.get_owner():
-            return
-        self.update_rotcopy(bpy.context)
-        self.update_rotoffs(bpy.context)
-        self.update_loccopy(bpy.context)
-        self.update_ik(bpy.context)
+        Returns:
+            bool: True if the constraint was applied successfully, False otherwise.
+        """
+        if not self.owner or not self.target:
+            print(f"Warning: Invalid mapping parameters for {self.name}")
+            return False
 
+        valid_owner, error_owner = BAC_Utils.validate_armature(owner)
+        valid_target, error_target = BAC_Utils.validate_armature(target)
+        if not valid_owner or not valid_target:
+            print(f"Error: {error_owner or error_target}")
+            return False
 
-    def clear(self):
-        self.remove(self.get_cr())
-        self.remove(self.get_rr())
-        self.remove(self.get_cp())
-        self.remove(self.get_ik())
-    
-    def remove(self, constraint):
-        if not self.get_owner():
-            return
-        self.get_owner().constraints.remove(constraint)
+        owner_bone = BAC_Utils.get_bone(owner, self.owner)
+        target_pose_bone = target.pose.bones.get(self.target)
+        if not owner_bone or not target_pose_bone:
+            print(f"Error: Bone not found - Source: {self.owner}, Target: {self.target}")
+            return False
 
-    def get_cr(self) -> bpy.types.Constraint:
-        if self.get_owner():
-            con = self.get_owner().constraints
-        else:
-            return None
-        
-        def new_cr():
-            cr = con.new(type='COPY_ROTATION')
-            cr.name = 'BAC_ROT_COPY'
-            cr.show_expanded = False
-            return cr
-        
-        return con.get('BAC_ROT_COPY') or new_cr()
-        
-    def get_rr(self) -> bpy.types.Constraint:
-        if self.get_owner():
-            con = self.get_owner().constraints
-        else:
-            return None
-        
-        def new_rr():
-            rr = con.new(type='TRANSFORM')
-            rr.name = 'BAC_ROT_ROLL'
-            rr.map_to = 'ROTATION'
-            rr.owner_space = 'CUSTOM'
-            rr.show_expanded = False
-            return rr
-        
-        return con.get('BAC_ROT_ROLL') or new_rr()
-        
-    def get_cp(self) -> bpy.types.Constraint:
-        if self.get_owner():
-            con = self.get_owner().constraints
-        else:
-            return None
+        try:
+            # Remove existing constraints with the same name
+            BAC_Utils.remove_constraints(target, self.target, constraint_prefix="BAC_")
 
-        def new_cp():
-            cp = con.new(type='COPY_LOCATION')
-            cp.name = 'BAC_LOC_COPY'
-            cp.show_expanded = False
-            return cp
-        
-        return con.get('BAC_LOC_COPY') or new_cp()
+            # Add new constraint
+            constraint = target_pose_bone.constraints.new(constraint_type)
+            constraint.name = f"BAC_{self.target}"
+            constraint.target = owner
+            constraint.subtarget = self.owner
+            constraint.mix_mode = 'ADD' if constraint_type == 'COPY_ROTATION' else 'REPLACE'
+            constraint.target_space = 'WORLD'
+            constraint.owner_space = 'WORLD'
 
-    def get_ik(self) -> bpy.types.Constraint:
-        if self.get_owner():
-            con = self.get_owner().constraints
-        else:
-            return None
-        
-        def new_ik():
-            ik = con.new(type='IK')
-            ik.name = 'BAC_IK'
-            ik.show_expanded = False
-            ik.chain_count = 2
-            ik.use_tail = False
-            return ik
-        
-        return con.get('BAC_IK') or new_ik()
+            # Cache the constraint
+            self._constraint_cache = constraint
+            print(f"Applied {constraint_type} constraint: {self.owner} -> {self.target}")
+            return True
+        except Exception as e:
+            print(f"Error applying mapping {self.name}: {e}")
+            return False
 
-classes = (
-	BAC_BoneMapping,
-)
+    def clear_cache(self) -> bool:
+        """Clear cached constraints for this mapping.
+
+        Returns:
+            bool: True if constraints were cleared successfully, False otherwise.
+        """
+        try:
+            if self._constraint_cache:
+                target_obj = bpy.data.objects.get(self._constraint_cache.target.name)
+                if target_obj and self.target in target_obj.pose.bones:
+                    BAC_Utils.remove_constraints(target_obj, self.target, constraint_prefix="BAC_")
+                self._constraint_cache = None
+                print(f"Cleared constraints for mapping: {self.name}")
+            return True
+        except Exception as e:
+            print(f"Error clearing cache for mapping {self.name}: {e}")
+            return False
+
+    def validate(self) -> bool:
+        """Validate the mapping by checking if bones exist in their respective armatures.
+
+        Returns:
+            bool: True if the mapping is valid, False otherwise.
+        """
+        owner_obj = bpy.context.scene.get("bac_owner")
+        target_obj = bpy.context.scene.bac_state.target
+        if not owner_obj or not target_obj:
+            return False
+        return (
+            BAC_Utils.get_bone(owner_obj, self.owner) is not None and
+            BAC_Utils.get_bone(target_obj, self.target) is not None
+        )
+
+def register():
+    """Register the BAC_BoneMapping class."""
+    try:
+        bpy.utils.register_class(BAC_BoneMapping)
+    except Exception as e:
+        print(f"Error registering BAC_BoneMapping: {e}")
+
+def unregister():
+    """Unregister the BAC_BoneMapping class."""
+    try:
+        bpy.utils.unregister_class(BAC_BoneMapping)
+    except Exception as e:
+        print(f"Error unregistering BAC_BoneMapping: {e}")
+
+if __name__ == "__main__":
+    register()

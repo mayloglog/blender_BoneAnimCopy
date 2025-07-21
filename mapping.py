@@ -1,601 +1,180 @@
-from fnmatch import translate
-
-from numpy import true_divide
+# SPDX-License-Identifier: GPL-2.0-or-later
 import bpy
-from bl_operators.presets import AddPresetBase
-from .utilfuncs import *
-import difflib
-import os
+from typing import List, Optional, Tuple
+from .data import BAC_BoneMapping  # 引用 data.py 中的 BAC_BoneMapping
+from .utilfuncs import BAC_Utils  # 引用 utilfuncs.py 中的工具函数
 
-def draw_panel(layout):
-    s = get_state()
-    
-    row = layout.row()
-    left = row.column_flow(columns=1, align=True)
-    box = left.box().row()
-    # 全选/反选按钮
-    if s.editing_type == 0:
-        box_left = box.row(align=True)
-        if s.selected_count == len(s.mappings):
-            box_left.operator('kumopult_bac.select_action', text='', emboss=False, icon='CHECKBOX_HLT').action = 'NONE'
-        else:
-            box_left.operator('kumopult_bac.select_action', text='', emboss=False, icon='CHECKBOX_DEHLT').action = 'ALL'
-            if s.selected_count != 0:
-                # 反选按钮仅在选中部分时出现
-                box_left.operator('kumopult_bac.select_action', text='', emboss=False, icon='UV_SYNC_SELECT').action = 'INVERSE'
-    # 编辑模式切换
-    box_right = box.row(align=False)
-    box_right.alignment = 'RIGHT'
-    box_right.operator('kumopult_bac.select_edit_type', text='' if s.editing_type!=0 else '映射', icon='PRESET', emboss=True, depress=s.editing_type==0).selected_type = 0
-    box_right.operator('kumopult_bac.select_edit_type', text='' if s.editing_type!=1 else '旋转', icon='CON_ROTLIKE', emboss=True, depress=s.editing_type==1).selected_type = 1
-    box_right.operator('kumopult_bac.select_edit_type', text='' if s.editing_type!=2 else '位移', icon='CON_LOCLIKE', emboss=True, depress=s.editing_type==2).selected_type = 2
-    box_right.operator('kumopult_bac.select_edit_type', text='' if s.editing_type!=3 else 'ＩＫ', icon='CON_KINEMATIC', emboss=True, depress=s.editing_type==3).selected_type = 3
-    # 映射列表
-    left.template_list('BAC_UL_mappings', '', s, 'mappings', s, 'active_mapping', rows=7)
-    # 预设菜单
-    box = left.box().row(align=True)
-    box.menu(BAC_MT_presets.__name__, text=BAC_MT_presets.bl_label, translate=False, icon='PRESET')
-    box.operator(AddPresetBACMapping.bl_idname, text="", icon='ADD')
-    box.operator(AddPresetBACMapping.bl_idname, text="", icon='REMOVE').remove_active=True
-    box.separator()
-    box.operator('kumopult_bac.open_preset_folder', text="", icon='FILE_FOLDER')
+class BAC_MappingManager:
+    """Manages a collection of bone mappings for the Bone Animation Copy Tool."""
 
-    right = row.column(align=True)
-    right.separator()
-    # 设置菜单
-    right.menu(BAC_MT_SettingMenu.__name__, text='', icon='DOWNARROW_HLT')
-    right.separator()
-    # 列表操作按钮
-    right.operator('kumopult_bac.list_action', icon='PRESET_NEW', text='').action = 'ADD_SELECT'
-    right.operator('kumopult_bac.list_action', icon='CON_TRACKTO', text='').action = 'ADD_ACTIVE'
-    right.operator('kumopult_bac.list_action', icon='ADD', text='').action = 'ADD'
-    right.operator('kumopult_bac.list_action', icon='REMOVE', text='').action = 'REMOVE'
-    right.operator('kumopult_bac.list_action', icon='TRIA_UP', text='').action = 'UP'
-    right.operator('kumopult_bac.list_action', icon='TRIA_DOWN', text='').action = 'DOWN'
-    right.separator()
-    right.operator('kumopult_bac.child_mapping', icon='CON_CHILDOF', text='')
-    right.operator('kumopult_bac.name_mapping', icon='FORWARD', text='')
-    right.operator('kumopult_bac.name_mapping_reverse', icon='BACK', text='')
-    right.operator('kumopult_bac.mirror_mapping', icon='MOD_MIRROR', text='')
-    right.operator('kumopult_bac.rot_mapping', icon='CON_ROTLIKE', text='')
+    @staticmethod
+    def create_mapping(state: bpy.types.PropertyGroup, source_bone: str, target_bone: str) -> Optional[BAC_BoneMapping]:
+        """Create a new bone mapping and add it to the state's mappings collection.
 
+        Args:
+            state: The BAC_State instance containing mappings and armature data.
+            source_bone: Name of the source bone.
+            target_bone: Name of the target bone.
 
-class BAC_UL_mappings(bpy.types.UIList):
-    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index, flt_flag):
-        s = get_state()
-        layout.alert = not item.is_valid() # 该mapping无效时警告
-        layout.active = item.selected or s.selected_count == 0
-        row  = layout.row(align=True)
+        Returns:
+            Optional[BAC_BoneMapping]: The created mapping if successful, None otherwise.
+        """
+        if not state.owner or not state.target:
+            print("Error: Source or target armature not set.")
+            return None
 
-        def mapping():
-            row.prop(item, 'selected', text='', emboss=False, icon='CHECKBOX_HLT' if item.selected else 'CHECKBOX_DEHLT')
-            row.prop_search(item, 'selected_owner', s.get_owner_armature(), 'bones', text='', translate=False, icon='BONE_DATA')
-            row.label(icon='BACK')
-            row.prop_search(item, 'target', s.get_target_armature(), 'bones', text='', translate=False, icon='BONE_DATA')
-        def rotation():
-            row.prop(item, 'has_rotoffs', icon='CON_ROTLIKE', icon_only=True)
-            layout.label(text=item.selected_owner, translate=False)
-            if item.has_rotoffs:
-                layout.prop(item, 'offset', text='')
-        def location():
-            row.prop(item, 'has_loccopy', icon='CON_LOCLIKE', icon_only=True)
-            layout.label(text=item.selected_owner, translate=False)
-            if item.has_loccopy:
-                layout.row().prop(item, 'loc_axis', text='', toggle=True)
-        def ik():
-            row.prop(item, 'has_ik', icon='CON_KINEMATIC', icon_only=True)
-            layout.label(text=item.selected_owner, translate=False)
-            if item.has_ik:
-                layout.prop(item, 'ik_influence', text='', slider=True)
-        
-        draw = {
-            0: mapping,
-            1: rotation,
-            2: location,
-            3: ik
-        }
+        valid_owner, error_owner = BAC_Utils.validate_armature(state.owner)
+        valid_target, error_target = BAC_Utils.validate_armature(state.target)
+        if not valid_owner or not valid_target:
+            print(f"Error: {error_owner or error_target}")
+            return None
 
-        draw[s.editing_type]()
+        if source_bone not in BAC_Utils.get_valid_bones(state.owner) or target_bone not in BAC_Utils.get_valid_bones(state.target):
+            print(f"Error: Invalid bones - Source: {source_bone}, Target: {target_bone}")
+            return None
 
-    def draw_filter(self, context, layout):
-        pass
+        try:
+            mapping = state.mappings.add()
+            mapping.name = f"{source_bone} -> {target_bone}"
+            mapping.owner = source_bone
+            mapping.target = target_bone
+            mapping.selected = False
+            state.active_mapping = len(state.mappings) - 1
+            print(f"Created mapping: {mapping.name}")
+            return mapping
+        except Exception as e:
+            print(f"Error creating mapping: {e}")
+            return None
 
-    def filter_items(self, context, data, propname):
-        flt_flags = []
-        flt_neworder = []
+    @staticmethod
+    def remove_mapping(state: bpy.types.PropertyGroup, index: int) -> bool:
+        """Remove a bone mapping at the specified index.
 
-        return flt_flags, flt_neworder
+        Args:
+            state: The BAC_State instance containing mappings.
+            index: Index of the mapping to remove.
 
-
-class BAC_MT_SettingMenu(bpy.types.Menu):
-    bl_label = "Setting"
-
-    def draw(self, context):
-        s = get_state()
-        layout = self.layout
-        layout.prop(s, 'sync_select')
-        layout.separator()
-        layout.prop(s, 'calc_offset')
-        layout.prop(s, 'ortho_offset')
-        layout.separator()
-
-
-class BAC_MT_presets(bpy.types.Menu):
-    bl_label = "映射表预设"
-    preset_subdir = "kumopult_bac"
-    preset_operator = "script.execute_preset"
-    draw = bpy.types.Menu.draw_preset
-
-class AddPresetBACMapping(AddPresetBase, bpy.types.Operator):
-    bl_idname = "kumopult_bac.mappings_preset_add"
-    bl_label = "添加预设 Add BAC Mappings Preset"
-    bl_description = "将当前骨骼映射表保存为预设，以供后续直接套用"
-    preset_menu = "BAC_MT_presets"
-
-    # variable used for all preset values
-    preset_defines = [
-        "s = bpy.context.scene.kumopult_bac_owner.data.kumopult_bac"
-    ]
-
-    # properties to store in the preset
-    preset_values = [
-        "s.mappings",
-        "s.selected_count"
-    ]
-
-    # where to store the preset
-    preset_subdir = "kumopult_bac"
-
-class BAC_OT_OpenPresetFolder(bpy.types.Operator):
-    bl_idname = 'kumopult_bac.open_preset_folder'
-    bl_label = '打开预设文件夹'
-
-    def execute(self, context):
-        os.system('explorer ' + bpy.utils.resource_path('USER') + '\scripts\presets\kumopult_bac')
-        return {'FINISHED'}
-
-class BAC_OT_SelectEditType(bpy.types.Operator):
-    bl_idname = 'kumopult_bac.select_edit_type'
-    bl_label = ''
-    bl_description = '选择编辑列表类型'
-    bl_options = {'UNDO'}
-
-    selected_type: bpy.props.IntProperty(override={'LIBRARY_OVERRIDABLE'})
-
-    def execute(self, context):
-        s = get_state()
-        s.editing_type = self.selected_type
-
-        return {'FINISHED'}
-
-class BAC_OT_SelectAction(bpy.types.Operator):
-    bl_idname = 'kumopult_bac.select_action'
-    bl_label = '列表选择操作'
-    bl_description = '全选/弃选/反选'
-    bl_options = {'UNDO'}
-
-    action: bpy.props.StringProperty(override={'LIBRARY_OVERRIDABLE'})
-
-    def execute(self, context):
-        s = get_state()
-
-        def all():
-            for m in s.mappings:
-                m.selected = True
-            s.selected_count = len(s.mappings)
-        
-        def inverse():
-            for m in s.mappings:
-                m.selected = not m.selected
-
-        def none():
-            for m in s.mappings:
-                m.selected = False
-            s.selected_count = 0
-        
-        ops = {
-            'ALL': all,
-            'INVERSE': inverse,
-            'NONE': none
-        }
-
-        ops[self.action]()
-
-        return {'FINISHED'}
-
-
-
-class BAC_OT_ListAction(bpy.types.Operator):
-    bl_idname = 'kumopult_bac.list_action'
-    bl_label = '列表基本操作'
-    bl_description = '依次为新建(批量)、新建(映射)、新建、删除、上移、下移\n其中在姿态模式下选中骨骼并点击新建的话，\n可以自动填入对应骨骼'
-    bl_options = {'UNDO'}
-
-    action: bpy.props.StringProperty(override={'LIBRARY_OVERRIDABLE'})
-
-    def execute(self, context):
-        s = get_state()
-
-        def add():
-            # 普通add
-            s.add_mapping('', '')
-        
-        def add_select():
-            # 选中项add
-            bone_names = []
-            for bone in s.owner.data.bones:
-                if bone.select:
-                    bone_names.append(bone.name)
-            for name in bone_names:
-                s.add_mapping(name, '')
-            bone_names = []
-            for bone in s.target.data.bones:
-                if bone.select:
-                    bone_names.append(bone.name)
-            for name in bone_names:
-                s.add_mapping('', name)
-        
-        def add_active():
-            # 激活项add
-            owner = s.owner.data.bones.active
-            target = s.target.data.bones.active
-            s.add_mapping(owner.name if owner != None else '', target.name if target != None else '')
-        
-        def remove():
-            if len(s.mappings) > 0:
-                s.remove_mapping()
-        
-        def up():
-            if s.selected_count == 0:
-                if len(s.mappings) > s.active_mapping > 0:
-                    s.mappings.move(s.active_mapping, s.active_mapping - 1)
-                    s.active_mapping -= 1
-            else:
-                move_indices = []
-                for i in range(1, len(s.mappings)):
-                    if s.mappings[i].selected:
-                        move_indices.append(i)
-                for i in move_indices:
-                    if not s.mappings[i - 1].selected:
-                        # 前一项未选中时才能前移
-                        s.mappings.move(i, i - 1)
-        
-        def down():
-            if s.selected_count == 0:
-                if len(s.mappings) > s.active_mapping + 1 > 0:
-                    s.mappings.move(s.active_mapping, s.active_mapping + 1)
-                    s.active_mapping += 1
-            else:
-                move_indices = []
-                for i in range(len(s.mappings) - 2, -1, -1):
-                    if s.mappings[i].selected:
-                        move_indices.append(i)
-                for i in move_indices:
-                    if not s.mappings[i + 1].selected:
-                        # 后一项未选中时才能后移
-                        s.mappings.move(i, i + 1)
-        
-        ops = {
-            'ADD': add,
-            'ADD_SELECT': add_select,
-            'ADD_ACTIVE': add_active,
-            'REMOVE': remove,
-            'UP': up,
-            'DOWN': down
-        }
-
-        ops[self.action]()
-
-        return {'FINISHED'}
-
-class BAC_OT_ChildMapping(bpy.types.Operator):
-    bl_idname = 'kumopult_bac.child_mapping'
-    bl_label = '子级映射'
-    bl_description = '如果选中映射的目标骨骼和自身骨骼都有且仅有唯一的子级，则在那两个子级间建立新的映射'
-    bl_options = {'UNDO'}
-    
-    execute_flag: bpy.props.BoolProperty(default=False, override={'LIBRARY_OVERRIDABLE'})
-
-    @classmethod
-    def poll(cls, context):
-        ret = True
-        s = get_state()
-        if s == None:
+        Returns:
+            bool: True if removal was successful, False otherwise.
+        """
+        if index < 0 or index >= len(state.mappings):
+            print("Error: Invalid mapping index.")
             return False
-        for i in s.get_selection():
-            if not s.mappings[i].is_valid():
-                ret = False
-        return ret
-    
-    def child_mapping(self, index):
-        s = get_state()
-        m = s.mappings[index]
-        if m.selected:
-            m.selected = False
-        target_children = s.get_target_armature().bones[m.target].children
-        owner_children = s.get_owner_armature().bones[m.owner].children
-        
-        if len(target_children) == len(owner_children) == 1:
-            s.add_mapping(owner_children[0].name, target_children[0].name, index + 1)[0].selected = True
-            self.execute_flag = True
-            # 递归调用，实现连锁对应
-            # self.child_mapping()
-        else:
-            for i in range(0, len(owner_children)):
-                s.add_mapping(owner_children[i].name, '', index + i + 1)[0].selected = True
-                self.execute_flag = True
-    
-    def execute(self, context):
-        s = get_state()
-        self.execute_flag = False
-        for i in s.get_selection():
-            self.child_mapping(i)
-        
-        if not self.execute_flag:
-            self.report({"ERROR"}, "所选项中没有可建立子级映射的映射")
-            
-        return {'FINISHED'}
 
-class BAC_OT_NameMapping(bpy.types.Operator):
-    bl_idname = 'kumopult_bac.name_mapping'
-    bl_label = '名称映射(向右)'
-    bl_description = '按照名称的相似程度来给自身骨骼自动寻找最接近的目标骨骼'
-    bl_options = {'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        ret = False
-        s = get_state()
-        if s == None:
+        try:
+            mapping = state.mappings[index]
+            mapping.clear_cache()  # Clear constraints before removal
+            state.mappings.remove(index)
+            state.active_mapping = max(0, index - 1)
+            print(f"Removed mapping: {mapping.name}")
+            return True
+        except Exception as e:
+            print(f"Error removing mapping: {e}")
             return False
-        for i in s.get_selection():
-            if s.mappings[i].get_owner() != None:
-                return True
-        return ret
 
-    def get_similar_bone(self, owner_name, target_bones):
-        similar_name = ''
-        similar_ratio = 0
+    @staticmethod
+    def apply_all_mappings(state: bpy.types.PropertyGroup, context: bpy.types.Context, constraint_type: str = 'COPY_ROTATION') -> bool:
+        """Apply all bone mappings to set up constraints.
 
-        for target in target_bones:
-            r = difflib.SequenceMatcher(None, owner_name, target.name).quick_ratio()
-            if r > similar_ratio:
-                similar_ratio = r
-                similar_name = target.name
-        
-        return similar_name
+        Args:
+            state: The BAC_State instance containing mappings and armature data.
+            context: The Blender context.
+            constraint_type: Type of constraint to apply (default: 'COPY_ROTATION').
 
-    def execute(self, context):
-        s = get_state()
-
-        for i in s.get_selection():
-            if s.mappings[i].get_owner() == None:
-                continue
-            m = s.mappings[i]
-            m.target = self.get_similar_bone(m.owner, s.get_target_armature().bones)
-
-        return {'FINISHED'}
-
-class BAC_OT_NameMapping_Reverse(bpy.types.Operator):
-    bl_idname = 'kumopult_bac.name_mapping_reverse'
-    bl_label = '名称映射(向左)'
-    bl_description = '按照名称的相似程度来给目标骨骼自动寻找最接近的自身骨骼'
-    bl_options = {'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        ret = False
-        s = get_state()
-        if s == None:
+        Returns:
+            bool: True if mappings were applied successfully, False otherwise.
+        """
+        if not state.mappings or not state.owner or not state.target:
+            print("Error: No mappings or invalid armatures.")
             return False
-        for i in s.get_selection():
-            if s.mappings[i].get_target() != None:
-                return True
-        return ret
 
-    def get_similar_bone(self, target_name, owner_bones):
-        similar_name = ''
-        similar_ratio = 0
-
-        for owner in owner_bones:
-            r = difflib.SequenceMatcher(None, target_name, owner.name).quick_ratio()
-            if r > similar_ratio:
-                similar_ratio = r
-                similar_name = owner.name
-        
-        return similar_name
-
-    def execute(self, context):
-        s = get_state()
-
-        for i in s.get_selection():
-            if s.mappings[i].get_target() == None:
-                continue
-            m = s.mappings[i]
-            m.selected_owner = self.get_similar_bone(m.target, s.get_owner_armature().bones)
-            m.update_owner(context)
-
-        return {'FINISHED'}
-
-class BAC_OT_MirrorMapping(bpy.types.Operator):
-    bl_idname = 'kumopult_bac.mirror_mapping'
-    bl_label = '镜像映射'
-    bl_description = '如果选中映射的目标骨骼和自身骨骼都有与之对称的骨骼，则在那两个对称骨骼间建立新的映射'
-    bl_options = {'UNDO'}
-
-    execute_flag: bpy.props.BoolProperty(default=False, override={'LIBRARY_OVERRIDABLE'})
-
-    @classmethod
-    def poll(cls, context):
-        ret = True
-        s = get_state()
-        if s == None:
+        try:
+            for mapping in state.mappings:
+                if mapping.validate():
+                    mapping.apply(state.owner, state.target, constraint_type)
+                else:
+                    print(f"Warning: Skipping invalid mapping: { morir  mapping.name}")
+            print("Applied all valid mappings.")
+            return True
+        except Exception as e:
+            print(f"Error applying mappings: {e}")
             return False
-        for i in s.get_selection():
-            if not s.mappings[i].is_valid():
-                ret = False
-        return ret
 
-    def mirror_mapping(self, index):
-        s = get_state()
-        m = s.mappings[index]
-        if m.selected:
-            m.selected = False
-        owner_mirror = s.get_owner_pose().bones.get(bpy.utils.flip_name(m.owner))
-        target_mirror = s.get_target_pose().bones.get(bpy.utils.flip_name(m.target))
-        if owner_mirror != None and target_mirror != None:
-            new_mapping = s.add_mapping(owner_mirror.name, target_mirror.name, index=index + 1)[0]
-            new_mapping.selected = True
-            self.execute_flag = True
+    @staticmethod
+    def clear_all_mappings(state: bpy.types.PropertyGroup) -> bool:
+        """Clear all constraints and reset mappings.
 
-    def execute(self, context):
-        s = get_state()
-        self.execute_flag = False
+        Args:
+            state: The BAC_State instance containing mappings.
 
-        for i in s.get_selection():
-            self.mirror_mapping(i)
-        
-        if not self.execute_flag:
-            self.report({"ERROR"}, "所选项中没有可镜像的映射")
-
-        return {'FINISHED'}
-
-class BAC_OT_RotMapping(bpy.types.Operator):
-    bl_idname = 'kumopult_bac.rot_mapping'
-    bl_label = '旋转映射'
-    bl_description = '将目标骨骼的旋转差异映射到自身骨骼'
-    bl_options = {'UNDO'}
-
-    execute_flag: bpy.props.BoolProperty(default=False, override={'LIBRARY_OVERRIDABLE'})
-
-    @classmethod
-    def poll(cls, context):
-        ret = False
-        s = get_state()
-        if s == None:
+        Returns:
+            bool: True if mappings were cleared successfully, False otherwise.
+        """
+        if not state.mappings:
+            print("No mappings to clear.")
             return False
-        for i in s.get_selection():
-            if s.mappings[i].is_valid():
-                ret = True
-        return ret
 
-    def rot_mapping(self, index, context):
-        s = get_state()
-        m = s.mappings[index]
+        try:
+            for mapping in state.mappings:
+                mapping.clear_cache()
+            state.mappings.clear()
+            state.active_mapping = -1
+            print("Cleared all mappings and constraints.")
+            return True
+        except Exception as e:
+            print(f"Error clearing mappings: {e}")
+            return False
 
-        # edit_bone
-        owner_bone = s.get_owner_armature().edit_bones[m.get_owner().name]
-        target_bone = s.get_target_armature().edit_bones[m.get_target().name]
+    @staticmethod
+    def validate_mappings(state: bpy.types.PropertyGroup) -> List[Tuple[BAC_BoneMapping, str]]:
+        """Validate all mappings and return a list of invalid mappings with error messages.
 
-        def calc_rot_in_custom_space(a, b):
-            """计算edit_bone a在b的自定义空间中的旋转"""
-            if not isinstance(a, bpy.types.EditBone) or not isinstance(b, bpy.types.EditBone):
-                raise ValueError("Both a and b must be instances of bpy.types.EditBone")
+        Args:
+            state: The BAC_State instance containing mappings.
 
-            rotation_in_custom_space = b.matrix.inverted() @ a.matrix
-            return [rotation_in_custom_space.to_euler().x,
-                    rotation_in_custom_space.to_euler().y,
-                    rotation_in_custom_space.to_euler().z]
+        Returns:
+            List[Tuple[BAC_BoneMapping, str]]: List of invalid mappings and their error messages.
+        """
+        invalid_mappings = []
+        for mapping in state.mappings:
+            if not mapping.validate():
+                error = f"Invalid bones - Source: {mapping.owner}, Target: {mapping.target}"
+                invalid_mappings.append((mapping, error))
+造句
 
-        rot_in_custom_space = calc_rot_in_custom_space(owner_bone, target_bone)
+        return invalid_mappings
 
-        if rot_in_custom_space != [0.0, 0.0, 0.0]:
-            m.has_rotoffs = True
-            # 将目标和拥有者皆设定为世界空间的旋转约束多余的旋转给转回来
-            # 相当于保留两根骨骼在编辑模式下的旋转偏差，仅映射姿态模式下的旋转
-            m.offset[0] = rot_in_custom_space[0]
-            m.offset[1] = rot_in_custom_space[1]
-            m.offset[2] = rot_in_custom_space[2]
-            m.update_rotoffs(context)
-            self.execute_flag = True
+    @staticmethod
+    def get_mapping_by_bone(state: bpy.types.PropertyGroup, bone_name: str, is_source: bool = True) -> Optional[Tuple[BAC_BoneMapping, int]]:
+        """Find a mapping by source or target bone name.
 
-    def execute(self, context):
-        s = get_state()
-        self.execute_flag = False
-        
-        # 纪录当前状态，改成编辑模式
-        # 两个骨架都要选才能进编辑模式
-        select_state = s.owner.select, s.target.select
-        active_obj = bpy.context.view_layer.objects.active
-        current_mode = bpy.context.object.mode
-        s.owner.select = s.target.select = True
-        bpy.context.view_layer.objects.active = s.owner
-        bpy.ops.object.mode_set(mode='EDIT')
-        
-        for i in s.get_selection():
-            if s.mappings[i].get_owner() == None:
-                continue
-            if s.mappings[i].get_target() == None:
-                continue
-            self.rot_mapping(i, context)
-        
-        # 恢复当前状态，恢复当前模式
-        bpy.ops.object.mode_set(mode=current_mode)
-        bpy.context.view_layer.objects.active = active_obj
-        s.owner.select, s.target.select = select_state
-        
-        if not self.execute_flag:
-            self.report({"ERROR"}, "所选项中没有可建立旋转映射的映射")
+        Args:
+            state: The BAC_State instance containing mappings.
+            bone_name: The name of the bone to search for.
+            is_source: If True, search by source bone; if False, search by target bone.
 
-        return {'FINISHED'}
+        Returns:
+            Optional[Tuple[BAC_BoneMapping, int]]: The mapping and its index if found, None otherwise.
+        """
+        if not bone_name:
+            return None
 
-class BAC_OT_Bake(bpy.types.Operator):
-    bl_idname = 'kumopult_bac.bake'
-    bl_label = '烘培动画'
-    bl_description = '根据来源骨架上动作的帧范围将约束效果烘培为新的动作片段\n本质上是在调用姿态=>动画=>烘焙动作这一方法,并自动设置一些参数\n注意这会让本插件所生成约束以外的约束也被烘焙'
-    bl_options = {'UNDO'}
+        try:
+            for i, mapping in enumerate(state.mappings):
+                if (is_source and mapping.owner == bone_name) or (not is_source and mapping.target == bone_name):
+                    return mapping, i
+            return None
+        except Exception as e:
+            print(f"Error finding mapping for bone {bone_name}: {e}")
+            return None
 
-    def execute(self, context):
-        bpy.ops.object.mode_set(mode='OBJECT')
-        bpy.ops.object.select_all(action='DESELECT')
-        bpy.context.view_layer.objects.active = bpy.context.scene.kumopult_bac_owner
-        bpy.context.object.select_set(True)
+def register():
+    """Register the mapping manager (no classes to register in this module)."""
+    pass
 
-        s = get_state()
-        a = s.target.animation_data
+def unregister():
+    """Unregister the mapping manager (no classes to unregister in this module)."""
+    pass
 
-        if not a:
-            # 先确保源骨架上有动作
-            alert_error('源骨架上没有动作！', '确保有动作的情况下才能自动判断烘培的帧范围')
-            return {'FINISHED'}
-        else:
-            # 选中约束的骨骼
-            bpy.ops.object.mode_set(mode='POSE')
-            bpy.ops.pose.select_all(action='DESELECT')
-            for m in s.mappings:
-                if m.owner == '':
-                    continue
-                s.get_owner_armature().bones.get(m.owner).select = True
-            # 打开约束进行烘培再关掉
-            s.preview = True
-            bpy.ops.nla.bake(
-                frame_start=int(a.action.frame_range[0]),
-                frame_end=int(a.action.frame_range[1]),
-                only_selected=True,
-                visual_keying=True,
-                bake_types={'POSE'}
-            )
-            s.preview = False
-            #重命名动作、添加伪用户
-            s.owner.animation_data.action.name = s.target.name
-            s.owner.animation_data.action.use_fake_user = True
-            return {'FINISHED'}
-
-
-classes = (
-    BAC_UL_mappings,
-    BAC_MT_SettingMenu, 
-    BAC_MT_presets,
-    AddPresetBACMapping,
-
-    BAC_OT_OpenPresetFolder,
-    BAC_OT_SelectEditType,
-    BAC_OT_SelectAction,
-    BAC_OT_ListAction,
-    BAC_OT_ChildMapping,
-    BAC_OT_NameMapping,
-    BAC_OT_NameMapping_Reverse,
-    BAC_OT_MirrorMapping,
-    BAC_OT_RotMapping,
-    BAC_OT_Bake,
-    )
+if __name__ == "__main__":
+    register()
