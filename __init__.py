@@ -4,7 +4,7 @@ bl_info = {
     "author": "Kumopult (optimized), maylog",
     "description": "Copy animation between armatures using bone constraints.",
     "blender": (4, 2, 0),
-    "version": (1, 1, 0),
+    "version": (1, 1, 1),
     "location": "View 3D > UI > BoneAnimCopy",
     "category": "Animation",
     "tracker_url": "https://space.bilibili.com/1628026",
@@ -590,3 +590,4 @@ def unregister():
 
 if __name__ == "__main__":
     register()
+
