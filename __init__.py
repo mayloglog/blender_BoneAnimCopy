@@ -4,7 +4,7 @@ bl_info = {
     "author": "Kumopult (optimized), maylog",
     "description": "Copy animation between armatures using bone constraints.",
     "blender": (4, 2, 0),
-    "version": (1, 1, 2),  
+    "version": (1, 1, 3),  
     "location": "View 3D > UI > BoneAnimCopy",
     "category": "Animation",
     "tracker_url": "https://space.bilibili.com/1628026",
@@ -57,8 +57,8 @@ def open_folder(path: str):
         else:
             subprocess.Popen(["xdg-open", path])
 
-# Tag constraints created by addon
-BAC_CONSTRAINT_TAG = "bac_addon_marker"
+# Tag constraints created by addon (now using name prefix)
+BAC_CONSTRAINT_PREFIX = "BAC_"
 
 # Simple reentrancy guard decorator
 def guard(name="is_updating"):
@@ -163,7 +163,6 @@ class BAC_BoneMapping(bpy.types.PropertyGroup):
         try:
             con = owner_pb.constraints.new(ctype)
             con.name = name
-            con[BAC_CONSTRAINT_TAG] = True
             if hasattr(con, "show_expanded"):
                 con.show_expanded = False
         except RuntimeError as e:
@@ -265,11 +264,11 @@ class BAC_BoneMapping(bpy.types.PropertyGroup):
                 self._remove_constraint(constraints['ik'])
 
     def _remove_constraint(self, con: bpy.types.Constraint):
-        """Remove a constraint if it was created by the addon."""
+        """Remove a constraint if it was created by the addon (by name prefix)."""
         owner_pb = self.get_owner_pose_bone()
         if not con or not owner_pb:
             return
-        if con.get(BAC_CONSTRAINT_TAG):
+        if con.name.startswith(BAC_CONSTRAINT_PREFIX):
             try:
                 owner_pb.constraints.remove(con)
             except RuntimeError as e:
@@ -281,7 +280,7 @@ class BAC_BoneMapping(bpy.types.PropertyGroup):
         if not owner_pb:
             return
         for con in list(owner_pb.constraints):
-            if con.get(BAC_CONSTRAINT_TAG):
+            if con.name.startswith(BAC_CONSTRAINT_PREFIX):
                 self._remove_constraint(con)
 
 class BAC_State(bpy.types.PropertyGroup):
@@ -599,7 +598,6 @@ class BAC_OT_NameMapping(bpy.types.Operator):
             if not owner_bone:
                 continue
             if self.use_hierarchy:
-                # Match based on hierarchy (parent-child relationships)
                 owner_parent = owner_bone.parent
                 for target_bone in state.get_target_armature().bones:
                     if owner_parent and target_bone.parent:
@@ -608,7 +606,6 @@ class BAC_OT_NameMapping(bpy.types.Operator):
                             best_score = 1.0
                             break
             else:
-                # Match based on name similarity
                 for target_bone in state.get_target_armature().bones:
                     target_name = target_bone.name
                     if self.prefix and not target_name.startswith(self.prefix):
@@ -660,23 +657,20 @@ class BAC_OT_Bake(bpy.types.Operator):
             alert_error("Bake Failed", "Source or target armature not set")
             return {"CANCELLED"}
         
-        # Validate animation data
         target_anim = state.target.animation_data
         if not target_anim or not getattr(target_anim, "action", None):
             alert_error("No Source Action", f"Target armature '{state.target.name}' has no animation data")
             return {"CANCELLED"}
 
-        # Set up baking
         bpy.ops.object.mode_set(mode='OBJECT')
         bpy.ops.object.select_all(action='DESELECT')
         context.view_layer.objects.active = owner_obj
         owner_obj.select_set(True)
 
-        # Store non-BAC constraints
         non_bac_constraints = []
         for pose_bone in owner_obj.pose.bones:
             for con in list(pose_bone.constraints):
-                if not con.get(BAC_CONSTRAINT_TAG):
+                if not con.name.startswith(BAC_CONSTRAINT_PREFIX):
                     try:
                         prev_enabled = con.enabled if hasattr(con, "enabled") else (not con.mute if hasattr(con, "mute") else True)
                         non_bac_constraints.append((con, prev_enabled))
@@ -684,7 +678,6 @@ class BAC_OT_Bake(bpy.types.Operator):
                     except AttributeError as e:
                         self.report({"WARNING"}, f"Cannot disable constraint '{con.name}' on '{pose_bone.name}': {str(e)}")
 
-        # Apply preview constraints
         state.preview = True
         try:
             bake_args = {
@@ -704,14 +697,12 @@ class BAC_OT_Bake(bpy.types.Operator):
         finally:
             state.preview = False
 
-        # Restore non-BAC constraints
         for con, enabled in non_bac_constraints:
             try:
                 set_constraint_enabled(con, enabled)
             except AttributeError as e:
                 self.report({"WARNING"}, f"Cannot restore constraint '{con.name}': {str(e)}")
 
-        # Rename baked action
         if owner_obj.animation_data and owner_obj.animation_data.action:
             try:
                 owner_obj.animation_data.action.name = f"{state.target.name}_baked"
